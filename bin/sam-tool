@@ -1,0 +1,84 @@
+#!/usr/bin/env python
+import os
+import sys
+import yaml
+import json
+import time
+import shutil
+from watchdog.observers import Observer
+from watchdog.events import FileSystemEventHandler
+from sam_tool.contrib.cfn_tools.yaml_loader import CfnYamlLoader
+
+class EventHandler(FileSystemEventHandler):
+    def __init__(self, paths, base_path ):
+        self.org_paths = paths
+        self.base_path = base_path
+        self.paths= {}
+        for n,p in paths.items():
+            self.paths[p] = n
+
+    def __move_file(self, file_path):
+        rel_path=os.path.relpath(file_path, self.base_path)
+        target = None
+        for p,n in self.paths.items():
+            if rel_path.startswith(p):
+                target = os.path.relpath(rel_path, p)
+                target = os.path.join(self.base_path,".aws-sam","build",n, target)
+                print("{} --> {}".format(file_path, target))
+                shutil.copyfile(file_path, target)
+
+    def on_modified(self, event):
+        if event.is_directory:
+            pass
+        else:
+            if event.src_path.endswith(".py"):
+                self.__move_file(event.src_path)
+
+
+def __read_config(conffile="template.yaml", base_path="."):
+    conf = None
+    conffile=os.path.join(base_path, conffile)
+    with open(conffile,"r") as f:
+        conf = yaml.load(f, Loader=CfnYamlLoader)
+    return conf
+
+import argparse
+
+
+mainparser = argparse.ArgumentParser(description="Sam Tool")
+mainparser.add_argument("--base-path", help="Base path, use this if run from another directory than where the template.yaml file is located", default=".")
+mainparser.add_argument("--config-file", help="Name of the template.yaml file to use", default="template.yaml")
+
+subparser = mainparser.add_subparsers(title="command", description="Sam build tool command", help="Sam tool command", dest="command")
+agentparser = subparser.add_parser("buildagent",help="Build Agent for sam projects")
+
+args = mainparser.parse_args()
+conf = __read_config(conffile=args.config_file, base_path=args.base_path)
+if not conf:
+    print("Failed to load template")
+    sys.exit(-1)
+
+if not args.command == 'buildagent':
+    print("something is wrong")
+    sys.exit(-1)
+
+## Process the Paths from AWS SAM Template
+paths = {} #name,path
+for r,v in conf["Resources"].items():
+    if v["Type"] != "AWS::Serverless::Function":
+        continue
+    paths[r] = v["Properties"]["CodeUri"]
+
+
+handler = EventHandler(paths, args.base_path)
+observer=Observer()
+for k,v in paths.items():
+   observer.schedule(handler, os.path.join(args.base_path,v) , recursive=True)
+
+observer.start()
+try:
+    while True:
+        time.sleep(1)
+except KeyboardInterrupt:
+    observer.stop()
+observer.join()
